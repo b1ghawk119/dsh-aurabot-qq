@@ -404,6 +404,22 @@ export function explainSongError(message) {
   return m
 }
 
+class SongDeliveryError extends Error {}
+
+/** 对聊天和模型只给固定的人话；报错原文留在日志和本机翻唱面板。 */
+export function songFailureReason(error) {
+  if (error instanceof SongClipError || error instanceof SongDeliveryError) return error.message
+  const m = String(error?.message || '')
+  if (/没有人声|都没有人声/.test(m)) return '这次没有检测到人声，请换个片段或歌曲版本。'
+  if (/网易云上没搜到/.test(m)) return '没搜到这首歌，请检查歌名或补上歌手。'
+  if (/会员|版权限制/.test(m)) return '这个歌曲版本暂时下载不了，请换一个版本，或请主人检查音乐账号设置。'
+  if (/没有可用的音色|没有导入音色/.test(m)) return '还没有可用音色，请主人在翻唱面板选择或导入音色。'
+  if (/No module named|ModuleNotFoundError|翻唱环境不完整|环境还没装好/.test(m)) return '翻唱环境不完整，请主人在翻唱面板检查安装。'
+  if (/out of memory|OutOfMemoryError|not enough memory/i.test(m)) return '处理这段歌的内存不够，请缩短片段或关闭占用较大的程序。'
+  if (/timeout|timed? out|超时|处理时间太长/i.test(m)) return '这次处理超时了，请缩短片段后再试。'
+  return '这次翻唱没完成，详细原因请主人查看翻唱面板。'
+}
+
 export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say, onSung, local }) {
   const cfg = () => getConfig().song
   const P = () => pathsOf(cfg().root || defaultRoot())
@@ -816,6 +832,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     const pitch = Number.isFinite(Number(job.pitch)) ? Math.max(-24, Math.min(24, Math.round(Number(job.pitch)))) : Number(c.pitch) || 0
     const dir = join(work(), Date.now().toString(36))
     mkdirSync(dir, { recursive: true })
+    job.workDir = dir
     current.stage = '下载歌曲'
     const song = job.file || (await download(job, dir))
     current.title = job.title || job.query
@@ -835,7 +852,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     const vol = await meanVolume(vocals)
     if (vol < VOCAL_MIN_DB) {
       log.info(`翻唱：「${job.title}」几乎没有人声（${vol.toFixed(0)} dB），像是纯音乐`)
-      try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
+      if (!c.keepWork) try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
       if (job.clip) throw new SongClipError('这段没有检测到人声，可能是前奏或间奏；请换个开始位置或增加时长。')
       // 仅凭一个片段不能认定整首歌没有人声。
       if (!job.file && !part.cut) markNoVocals(job.songKey)
@@ -860,6 +877,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   function noticeFail(job, error, why) {
     const title = job.title || job.query
     const now = Date.now()
+    for (const [id, item] of failNoticed) if (now - item.at >= FAIL_NOTICE_GAP) failNoticed.delete(id)
     const last = failNoticed.get(job.chatId)
     if (last && now - last.at < FAIL_NOTICE_GAP) {
       log.info(`翻唱失败提示刚发过（${Math.round((now - last.at) / 1000)} 秒前），这次不重复：「${title}」`)
@@ -867,13 +885,13 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     }
     failNoticed.set(job.chatId, { at: now, why })
     // 模型那边彻底挂了也得让人听到一句，不能一声不吭；这句只是兜底，不是原来的模板
-    const plain = error instanceof SongClipError ? `「${title}」：${error.message}` : `「${title}」这次没唱成，回头再试试？`
-    if (!say || error instanceof SongClipError) {
+    const plain = `「${title}」：${songFailureReason(error)}`
+    if (!say || error instanceof SongClipError || error instanceof SongDeliveryError) {
       Promise.resolve(sendText?.(job.chatId, plain)).catch(() => {})
       return
     }
     Promise.resolve()
-      .then(() => say({ chatId: job.chatId, title, query: job.query, why, error: String(error?.message || '') }))
+      .then(() => say({ chatId: job.chatId, title, query: job.query, why: songFailureReason(error), error: songFailureReason(error) }))
       .catch((e) => {
         log.warn('翻唱失败提示没说出来，退回一句短的：', e?.message || e)
         Promise.resolve(sendText?.(job.chatId, plain)).catch(() => {})
@@ -888,11 +906,13 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     try {
       const r = await process1(job)
       current.stage = '发送'
-      await sendVoiceFile(job.chatId, r.file, `[${job.acapella ? '清唱' : '翻唱'}] ${job.title || job.query}`)
-      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ...(job.clip ? { clip: job.clip } : {}), ok: true, message: `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
-      log.info(`翻唱完成：「${job.title || job.query}」`)
-      onSung?.(job.title || job.query, job.chatId)
-      if (!cfg().keepWork) try { rmSync(r.dir, { recursive: true, force: true }) } catch (error) {}
+      const delivery = await sendVoiceFile(job.chatId, r.file, `[${job.acapella ? '清唱' : '翻唱'}] ${job.title || job.query}`)
+      // 老的自定义发送回调可不返回值；显式未发出和等待补发不能记成已送达。
+      if (delivery === null || delivery === false) throw new SongDeliveryError('翻唱已制作，但语音发送未确认，请先查看目标聊天，避免重复点歌。')
+      const queued = delivery?.queued === true
+      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ...(job.clip ? { clip: job.clip } : {}), ok: true, ...(queued ? { queued: true } : {}), message: queued ? '已制作并交给补发队列；请在目标聊天确认送达' : `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
+      log.info(`翻唱${queued ? '等待补发' : '完成'}：「${job.title || job.query}」`)
+      if (!queued) onSung?.(job.title || job.query, job.chatId)
     } catch (error) {
       const why = explainSongError(error.message)
       history.unshift({ at: Date.now(), title: job.title || job.query, ...(job.clip ? { clip: job.clip } : {}), ok: false, message: why })
@@ -900,6 +920,8 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
       // 说什么由她自己定：原来那句固定文案对谁、什么原因都一样，听着不像她说的
       noticeFail(job, error, why)
     } finally {
+      // 下载、分离、换声或发送失败也释放本次工作文件；不碰原文件和成品缓存。
+      try { if (job.workDir && !cfg().keepWork) rmSync(job.workDir, { recursive: true, force: true }) } catch (error) { log.warn('翻唱临时文件未清理：', error.message) }
       history = history.slice(0, 20)
       current = null
       pump()
@@ -907,7 +929,15 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   }
 
   /** 点一首：马上返回，做好了自己发到聊天里。 */
-  function request({ song, songId, file, pitch, voice, chatId, acapella, startSec, durationSec }) {
+  function request(options) {
+    try { return enqueue(options) }
+    catch (error) {
+      log.warn('翻唱点歌未完成：', error?.message || error)
+      return { ok: false, message: '点歌未完成，请先查看翻唱面板的任务状态再重试；详细原因已记录在本机日志。' }
+    }
+  }
+
+  function enqueue({ song, songId, file, pitch, voice, chatId, acapella, startSec, durationSec }) {
     const c = cfg()
     if (!c.enabled) return { ok: false, message: '翻唱还没打开（面板「翻唱」标签里开）' }
     const selection = validateSongClip({ startSec, durationSec }, c.maxVoiceSec)

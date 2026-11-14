@@ -7,17 +7,24 @@ import { changePermissions } from './permission-policy.js'
 import { planGroupSettings, readSettings } from '../modules/contacts/group-settings.js'
 
 const HELP = [
-  '群设置（仅主人私聊，不经过模型）',
-  '/群设置 查看 全部　查看所有已加入群；群多时按提示翻页',
-  '/群设置 查看 123456789　查看一个群',
-  '/群设置 修改 123456789 主动 关 窗口 开',
+  '群设置｜仅主人私聊，直接执行，不经过模型',
+  '',
+  '看设置',
+  '/群设置 查看 全部',
+  '/群设置 查看 123456789',
+  '',
+  '改一个群（没写的项不变）',
+  '/群设置 修改 123456789 主动 关',
+  '主动＝没人叫时插话；窗口＝聊起来后继续接话。',
+  '可改：主动、窗口、旁听、白名单；后面填 开 或 关。',
+  '',
+  '批量改（先预览，再确认）',
   '/群设置 修改 123456789,987654321 旁听 开',
-  '可选项：主动、窗口、旁听、白名单；每项后填 开 或 关。没写的项不变。',
-  '群号用逗号隔开，或填 全部（当前已加入群）；批量修改先预览，再按回复确认。',
-  '/群设置 恢复 123456789　恢复该群全部接话默认，不改白名单和旁听',
-  '/群设置 取消　取消待确认的修改',
-  '旁听只管非白名单群的新文字，不删旧记忆；整理可能产生费用。',
-  '总开关在面板「聊天 → 主人私聊：群设置指令」。',
+  '群号也可填 全部；放弃用 /群设置 取消。',
+  '',
+  '/群设置 恢复 123456789：恢复该群全部接话默认，白名单和旁听不变。',
+  '旁听只额外记录非白名单群的新文字，整理可能产生费用，不删旧记忆。',
+  '指令总开关：面板 → 聊天 → 主人私聊：群设置指令。',
 ].join('\n')
 const FIELDS = { 主动: 'proactive', 窗口: 'engaged', 旁听: 'passive_memory', 白名单: 'whitelist' }
 const MAX_BATCH = 100, PAGE_SIZE = 10, TTL = 2 * 60_000
@@ -77,7 +84,7 @@ function baseline(cfg, ids) {
 
 function changeText(request) {
   return request.action === 'reset' ? '恢复全部接话默认（包括概率和次数等单独设置），白名单和旁听不变'
-    : Object.entries(FIELDS).filter(([, key]) => Object.hasOwn(request.changes, key)).map(([label, key]) => `${label} ${request.changes[key] ? '开' : '关'}`).join('；') + '。没写的项不变'
+    : Object.entries(FIELDS).filter(([, key]) => Object.hasOwn(request.changes, key)).map(([label, key]) => `${label} ${request.changes[key] ? '开' : '关'}`).join('\n') + '\n其余设置不变。'
 }
 function consequences(request, cfg, ids) {
   const lines = []
@@ -89,9 +96,58 @@ function consequences(request, cfg, ids) {
   lines.push('接话只对白名单群生效；总开关、暂停、静默和次数限制仍有效。')
   return lines.join('\n')
 }
-function compact(state) {
-  const s = state
-  return `${s.group_id}：白名单${s.chat_whitelisted ? '开' : '关'}；被叫到${s.can_reply_by_settings ? '按规则回' : '暂不发'}；主动${s.proactive ? '开' : '关'}（${Math.round(s.interject_chance * 100)}%）；窗口${s.engaged ? '开' : '关'}；旁听${s.passive_memory ? '开' : '关'}；记忆${s.memory_enabled ? '开' : '关'}${s.reply_paused ? '；已暂停' : ''}${s.in_quiet_hours ? '；静默时段' : ''}${s.proactive && s.proactive_max_per_hour === 0 ? '；主动次数上限为 0' : ''}${s.engaged && s.engaged_max === 0 ? '；窗口次数上限为 0' : ''}`
+const on = value => value ? '开' : '关'
+function memorySummary(s) {
+  if (!s.memory_enabled) return '关（记忆总开关关闭）'
+  return s.memory_scope === 'whitelist' ? '开（白名单群规则）' : s.memory_scope === 'passive' ? '开（旁听新文字）' : '总开关开，未开旁听'
+}
+function chatSummary(cfg, s) {
+  const reasons = []
+  if (!s.chat_whitelisted) reasons.push('不在白名单')
+  if (!cfg.enabled) reasons.push('总开关关闭')
+  else if (cfg.debug) reasons.push('调试模式')
+  else if (cfg.dryRun) reasons.push('试运行')
+  if (s.reply_paused) reasons.push('已暂停')
+  return reasons.length ? '暂不回复（' + reasons.join('、') + '）' : '按规则回复'
+}
+function groupReport(cfg, report, { name = '', brief = false } = {}) {
+  const s = report.state
+  const title = name ? `${name}（${s.group_id}）` : `群 ${s.group_id}`
+  const chance = `基础 ${Math.round(s.interject_chance * 100)}%`
+  const active = `${on(s.proactive)}（${chance}${s.proactive && s.proactive_max_per_hour === 0 ? '，次数上限为 0，暂不插话' : ''}）`
+  const window = `${on(s.engaged)}${s.engaged && s.engaged_max === 0 ? '（次数上限为 0，暂不接话）' : ''}`
+  const passive = s.passive_memory ? '已加入' : '未加入'
+  if (brief) return [
+    title,
+    `白名单：${s.chat_whitelisted ? '在' : '不在'}；被叫到：${chatSummary(cfg, s)}`,
+    `主动：${active}；窗口：${window}`,
+    `记忆：${memorySummary(s)}；旁听名单：${passive}`,
+    s.in_quiet_hours && s.chat_whitelisted && (s.proactive || s.engaged) ? '当前静默时段：不主动插话或窗口接话。' : '',
+  ].filter(Boolean).join('\n')
+  const quiet = s.quiet_hours[0] === s.quiet_hours[1] ? '未设置' : s.quiet_hours.map(h => String(h).padStart(2, '0') + ':00').join('–')
+  // 只去掉已在白名单/记录范围中说明的重复文字；实际限制和恢复方式保留。
+  const notices = s.notices.filter(n => !n.startsWith('不在聊天白名单') && !n.startsWith('白名单群的记忆') && !n.startsWith('没有额外旁听'))
+  return [title, '',
+    `聊天白名单：${s.chat_whitelisted ? '在' : '不在'}`,
+    `被叫到：${chatSummary(cfg, s)}`,
+    `主动插话：${active}`,
+    `窗口接话：${window}`,
+    '',
+    `记忆：${memorySummary(s)}`,
+    `旁听名单：${passive}${s.chat_whitelisted ? '（对白名单群不生效）' : ''}`,
+    '',
+    `接话规则：${s.follows_defaults ? '跟随全局' : '此群单独设置'}`,
+    `主动：每小时最多 ${s.proactive_max_per_hour} 次，间隔至少 ${s.proactive_cooldown_seconds} 秒`,
+    `窗口：最近 3 分钟说过话时，最多连续 ${s.engaged_max} 次`,
+    `静默时段：${quiet}${quiet === '未设置' ? '' : '（只限制主动和窗口）'}`,
+    ...(!s.chat_whitelisted ? ['未加入白名单，以上接话设置暂不生效。'] : []),
+    ...(notices.length ? ['', ...notices.map(n => '提醒：' + n)] : []),
+  ].join('\n')
+}
+function groupIds(ids) {
+  const rows = []
+  for (let i = 0; i < ids.length; i += 5) rows.push(ids.slice(i, i + 5).join('、'))
+  return rows.join('\n')
 }
 
 export async function runGroupSettingsCommand(arg, msg, deps) {
@@ -120,7 +176,7 @@ export async function runGroupSettingsCommand(arg, msg, deps) {
       if (current.dryRun || current.debug) return '试运行或调试中，未保存。'
       const result = plan(current, pending.request, pending.ids)
       if (result.changed) setConfig(result.next)
-      return `已${result.changed ? '保存' : '检查，设置没变'} ${pending.ids.length} 个群：${pending.ids.join('、')}\n${changeText(pending.request)}\n${consequences(pending.request, current, pending.ids)}\n可用 /群设置 查看 群号 核对。`
+      return `已${result.changed ? '保存' : '检查，设置没变'} ${pending.ids.length} 个群\n${groupIds(pending.ids)}\n\n${changeText(pending.request)}\n\n${consequences(pending.request, current, pending.ids)}\n可用 /群设置 查看 群号 核对。`
     }
     if (request.action !== 'get') session.pending = null
     const names = new Map()
@@ -139,17 +195,18 @@ export async function runGroupSettingsCommand(arg, msg, deps) {
     if (request.action === 'get') {
       const pages = Math.ceil(ids.length / PAGE_SIZE)
       if (request.page > pages) return `没有这一页，当前共 ${pages} 页。请重新查看。`
-      if (ids.length === 1) return report(cfg, ids[0]).message
+      if (ids.length === 1) return groupReport(cfg, report(cfg, ids[0]), { name: names.get(ids[0]) })
       const slice = ids.slice((request.page - 1) * PAGE_SIZE, request.page * PAGE_SIZE)
-      return [`共 ${ids.length} 个群，第 ${request.page}/${pages} 页。`, ...slice.map(id => (names.get(id) ? names.get(id) + ' · ' : '') + compact(report(cfg, id).state)),
-        '接话开关只对白名单群生效；白名单群的记忆不受旁听名单控制。',
+      return [`共 ${ids.length} 个群，第 ${request.page}/${pages} 页。`,
+        ...slice.map(id => groupReport(cfg, report(cfg, id), { name: names.get(id), brief: true })),
+        '非白名单群不接话；白名单群的记忆不受旁听名单控制。',
         !cfg.enabled ? '总开关关闭，不发消息也不新增旁听。' : cfg.debug ? '调试中，不发消息也不新增旁听。' : cfg.dryRun ? '试运行，不发消息但仍可能记录记忆。' : '',
-        request.page < pages ? `下一页：/群设置 查看 ${request.target} ${request.page + 1}` : '已到末页。'].filter(Boolean).join('\n')
+        request.page < pages ? `下一页：/群设置 查看 ${request.target} ${request.page + 1}` : '已到末页。'].filter(Boolean).join('\n\n')
     }
     if (ids.length > MAX_BATCH) return '一次最多修改 100 个群，请用逗号分隔群号分批操作；本次未修改。'
     const result = plan(cfg, request, ids)
-    if (!result.changed) return '设置没变。\n' + (ids.length === 1 ? report(cfg, ids[0]).message : changeText(request))
-    const summary = `${ids.length} 个群：${ids.join('、')}\n${changeText(request)}\n${consequences(request, cfg, ids)}`
+    if (!result.changed) return '设置没变。\n' + (ids.length === 1 ? groupReport(cfg, report(cfg, ids[0])) : changeText(request))
+    const summary = `${ids.length} 个群\n${groupIds(ids)}\n\n${changeText(request)}\n\n${consequences(request, cfg, ids)}`
     if (cfg.dryRun || cfg.debug) return '试运行或调试：仅预览，未保存。\n' + summary
     if (ids.length > 1 || request.target === '全部') {
       const code = String(randomInt(100000, 1000000))
@@ -157,7 +214,7 @@ export async function runGroupSettingsCommand(arg, msg, deps) {
       return `待确认，尚未修改。\n${summary}\n仅修改以上群号，不包含之后新加入的群。\n2 分钟内发送 /群设置 确认 ${code}\n放弃请发 /群设置 取消；新的修改指令会替换这次预览。`
     }
     setConfig(result.next)
-    return '已保存。\n' + report(getConfig(), ids[0]).message
+    return '已保存。\n\n' + groupReport(getConfig(), report(getConfig(), ids[0]))
   } catch (error) {
     deps.log?.warn?.('群设置指令未完成：', error?.message)
     return '群设置操作未完成，保存结果未确认。请先用 /群设置 查看 群号 核对后再重试。'

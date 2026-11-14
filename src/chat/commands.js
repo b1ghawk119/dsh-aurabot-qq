@@ -222,13 +222,18 @@ export async function runCommand(cmd, msg, deps) {
     case 'diary': {
       if (!qzone) return '空间日记没开'
       const r = await qzone.writeDiary()
-      return r.ok ? (r.dryRun ? '写好了，不过现在是试运行，没真发' : '写好发出去啦，去空间看看') : '没写成：' + (r.message || '不知道为啥')
+      if (r.ok) return r.dryRun ? '写好了，不过现在是试运行，没真发' : '写好发出去啦，去空间看看'
+      deps.log?.warn?.('日记命令失败：', r.message)
+      const known = ['上一篇还在写', '她这次没写出来', '总开关关着', '说说是空的', '发布前开关已变化，本次未发布。', '说说可见范围配置无效，已停止发布。', '未知的说说可见范围，已停止发布。', '选择了部分好友范围，但 QQ 名单为空，已停止发布；不会改成公开。']
+      return known.includes(r.message) ? '没写成：' + r.message : '日记发布未确认，请先查看空间是否已发出，再决定是否重试；详细原因请主人查看本机日志。'
     }
     case 'remember': {
       if (!memory) return '记忆模块关着'
       if (!cmd.arg) return '要我记住什么呀？比如 /remember 我不吃香菜'
       const r = memory.add({ text: cmd.arg, aboutName: cfg.ownerName || '主人', about: cfg.ownerQQ, importance: 0.8, source: 'panel', chatId: msg.chatId })
-      return r.ok ? '记住了' : '没记上：' + (r.message || '')
+      if (r.ok) return '记住了'
+      deps.log?.warn?.('记忆命令失败：', r.message)
+      return '这次记忆保存未确认，请先在记忆面板查看；详细原因请主人查看本机日志。'
     }
     case 'reset':
       hub.resetChat(msg.chatId)

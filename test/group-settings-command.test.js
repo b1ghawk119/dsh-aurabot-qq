@@ -100,7 +100,7 @@ test('所有群查询分页明确、包含非白名单群，查询不改暂停�
   x.deps.mutes.until = id => id === 'group:' + G ? 0 : undefined
   const first = await x.run('查看 全部')
   assert.match(first, /共 12 个群，第 1\/2 页/); assert.match(first, /下一页：\/群设置 查看 全部 2/)
-  assert.match(first, /已暂停/); assert.match(first, /白名单关/)
+  assert.match(first, /已暂停/); assert.match(first, /白名单：不在/)
   const last = await x.run('查看 全部 2'); assert.match(last, /第 2\/2 页/); assert.match(last, /已到末页/)
   assert.match(await x.run('查看 全部 3'), /没有这一页/)
   assert.match(await x.run(`查看 ${H}`), /旁听只记录之后收到的文字/)
@@ -143,4 +143,31 @@ test('保存异常不给聊天泄露路径/堆栈，不把失败说成成功', a
   const x = setup(); x.deps.setConfig = () => { throw new Error('EACCES C:\\private\\token.json at stack.js') }
   const r = await x.run(`修改 ${G} 主动 关`)
   assert.match(r, /保存结果未确认/); assert.doesNotMatch(r, /EACCES|private|token|stack/)
+})
+
+test('查询按群分段，单群保留限制，批量回执逐项列出改动', async () => {
+  const x = setup({group:{quietHours:[0,0], overrides:{[G]:{proactiveEnabled:false,engagedEnabled:true}}},memory:{enabled:true,passiveGroups:[H]}})
+  const all=await x.run('查看 全部')
+  assert.match(all,/甲（30000003）\n白名单：在/)
+  assert.match(all,/主动：关（基础 15%）；窗口：开\n记忆：开（白名单群规则）/)
+  assert.match(all,/\n\n乙（40000004）\n白名单：不在/)
+  assert.match(all,/旁听新文字/)
+  const one=await x.run(`查看 ${G}`)
+  assert.match(one,/主动插话：关/);assert.match(one,/窗口接话：开/)
+  assert.match(one,/每小时最多 6 次，间隔至少 90 秒/)
+  assert.match(one,/最近 3 分钟/);assert.match(one,/对白名单群不生效/)
+  const p=await x.run(`修改 ${G},${H} 主动 开 窗口 关`)
+  assert.match(p,/\n主动 开\n窗口 关\n其余设置不变/);assert.match(p,/尚未修改/)
+  assert.equal(x.saves(),0)
+})
+test('总开关、试运行、暂停、静默和零次数限制不能被简短排版隐藏', async()=>{
+  for(const [patch,label] of [[{enabled:false},'总开关关闭'],[{debug:true},'调试模式'],[{dryRun:true},'试运行']]){
+    const x=setup(patch);assert.ok((await x.run('查看 全部')).includes(label))
+  }
+  const x=setup({group:{maxPerHour:0,engagedMax:0,quietHours:[1,8]}})
+  x.deps.mutes.until=()=>0
+  const text=await x.run(`查看 ${G}`)
+  assert.match(text,/已暂停/);assert.match(text,/\/active/);assert.match(text,/次数上限为 0/);assert.match(text,/01:00–08:00/)
+  const y=setup({memory:{enabled:false,passiveGroups:[H]}})
+  assert.match(await y.run(`查看 ${H}`),/记忆总开关关闭/)
 })

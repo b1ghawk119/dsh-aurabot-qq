@@ -2342,7 +2342,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
         if (disposed || (sensitiveCommand && !ownerStillCurrent())) return
         const detail = sensitiveCommand || error.message
         log.warn('执行命令出错：', detail)
-        const text = sensitiveCommand ? '命令没执行成功' : '命令没执行成功：' + detail
+        const text = '命令没执行成功，请先查看当前状态再决定是否重试；详细原因请主人查看本机日志。'
         await sendSegments(msg.chatId, [{ type: 'text', data: { text } }], '命令出错', {
           force: true, sensitive: Boolean(sensitiveCommand), isCurrent: sensitiveCommand ? ownerStillCurrent : null,
         })
