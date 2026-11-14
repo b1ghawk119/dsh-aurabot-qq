@@ -1302,7 +1302,8 @@ test('主人私聊可以查询最新 QQ 资料，关闭资料模块后查询工�
   const expected = { ...mock.state.selfProfile }
   mock.push(priv(OWNER, text('查看QQ资料测试')))
   const c = await lastCall('查看QQ资料测试')
-  assert.equal(c.result.ok, true)
+  assert.equal(c.name, 'qq_get_profile', '应读取本次资料查询的回执')
+  assert.equal(c.result.ok, true, JSON.stringify(c.result))
   assert.equal(c.result.profile.nickname, expected.nickname)
   assert.equal(c.result.profile.signature, expected.long_nick)
   assert.equal(mock.sent('get_stranger_info').at(-1).params.no_cache, true)
