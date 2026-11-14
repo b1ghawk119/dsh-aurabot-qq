@@ -6525,7 +6525,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [s, setS] = useState(st.song)
       const [q, setQ] = useState('')
       const [found, setFound] = useState(null)
-      const [pitch, setPitch] = useState(0)
+      const [pitch, setPitch] = useState(st.config.song.pitch || 0)
+      const [startSec, setStartSec] = useState('')
+      const [durationSec, setDurationSec] = useState('')
       const [acct, setAcct] = useState(null)
       const load = () => get('/song/status').then((r) => r.ok && setS(r))
       // 安装中 / 正在唱的时候每 3 秒刷新一次进度
@@ -6538,7 +6540,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }, [s && s.install.running, s && Boolean(s.current), s && s.queue.length])
       if (!s) return h(Empty, { icon: '⏳', text: '加载中…' })
       const search = async () => { if (!q.trim()) return; setFound(null); const r = await get('/song/search?q=' + encodeURIComponent(q)); setFound(r.list || []); if (!r.ok) toast(r.message, 'err') }
-      const sing = async (song) => { const r = await post('/song/request', { songId: song.id, song: song.name, pitch }); toast(r.message, r.ok ? 'ok' : 'err'); load() }
+      const validSegment = (startSec === '' || (Number.isSafeInteger(Number(startSec)) && Number(startSec) >= 0 && Number(startSec) <= 86400))
+        && (durationSec === '' || (Number.isSafeInteger(Number(durationSec)) && Number(durationSec) > 0 && Number(durationSec) <= st.config.song.maxVoiceSec))
+      const sing = async (song) => { if (!validSegment) return; const r = await post('/song/request', { songId: song.id, song: song.name, pitch, ...(startSec !== '' ? { startSec: Number(startSec) } : {}), ...(durationSec !== '' ? { durationSec: Number(durationSec) } : {}) }); toast(r.message, r.ok ? 'ok' : 'err'); load() }
       const voices = s.voices.map((v) => ({ value: v.id, label: v.id, desc: v.hasIndex ? '带 .index' : '' }))
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '翻唱', right: f.sw('song.enabled'), desc: '让ta用自己的声音唱歌：点歌 → 从网易云下载 → 分离人声和伴奏 → 用 RVC 换成ta的声音 → 混音 → 发语音条。主人在 QQ 里说「唱首歌」，或者发 /sing 歌名 都行。' },
@@ -6588,17 +6592,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Btn, { small: true, onClick: search, disabled: !q.trim() }, '搜索'),
             h('span', { className: 'ab-muted ab-small' }, '变调'),
             h('input', { className: 'ab-input sm', type: 'number', min: -24, max: 24, value: pitch, onChange: (e) => setPitch(Number(e.target.value) || 0) })),
+          h(Row, { label: '这次唱哪一段', hint: `都留空沿用上方设置；只填时长就从头唱。本次最长 ${st.config.song.maxVoiceSec} 秒，改上限要先保存。` },
+            h('input', { className: 'ab-input sm', type: 'number', min: 0, max: 86400, step: 1, 'aria-label': '开始秒数', placeholder: '开始秒数', value: startSec, onChange: e => setStartSec(e.target.value) }),
+            h('span', { className: 'ab-muted' }, '秒起，唱'),
+            h('input', { className: 'ab-input sm', type: 'number', min: 1, max: st.config.song.maxVoiceSec, step: 1, 'aria-label': '片段时长', placeholder: '时长', value: durationSec, onChange: e => setDurationSec(e.target.value) }), h('span', { className: 'ab-muted' }, '秒')),
+          !validSegment ? h('div', { className: 'ab-note warn', role: 'alert' }, '开始位置填非负整数；时长填正整数，不能超过已保存的最长时长。') : null,
           found === null ? null : found.length === 0 ? h('div', { className: 'ab-muted', style: { marginTop: 8 } }, '没搜到') :
             h('table', { className: 'ab-table', style: { marginTop: 10 } }, h('tbody', null, found.map((x) => h('tr', { key: x.id },
               h('td', null, x.name, x.vip ? h('span', { className: 'ab-badge', style: { marginLeft: 6 } }, '会员') : null),
               h('td', { className: 'ab-muted' }, x.artists),
               h('td', { className: 'ab-muted' }, Math.floor(x.durationSec / 60) + ':' + String(x.durationSec % 60).padStart(2, '0')),
-              h('td', null, h(Btn, { small: true, kind: 'primary', disabled: !s.ready || !draft.song.enabled, onClick: () => sing(x) }, '唱给我听')))))),
+              h('td', null, h(Btn, { small: true, kind: 'primary', disabled: !s.ready || !draft.song.enabled || !validSegment, onClick: () => sing(x) }, '唱给我听')))))),
           !draft.song.enabled ? h('div', { className: 'ab-muted ab-small', style: { marginTop: 8 } }, '先打开上面的「翻唱」开关并保存。') : null,
-          s.current ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, h('i', { className: 'ab-spin' }), ' 正在唱「' + s.current.title + '」：' + s.current.stage + (s.queue.length ? '（后面还有 ' + s.queue.length + ' 首）' : '')) : null,
+          s.current ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, h('i', { className: 'ab-spin' }), ' 正在唱「' + s.current.title + '」：' + s.current.stage + (s.current.clip ? `（第 ${s.current.clip.startSec} 秒起，最多 ${s.current.clip.durationSec} 秒）` : '') + (s.queue.length ? '（后面还有 ' + s.queue.length + ' 首）' : '')) : null,
           s.history.length ? h('div', { className: 'ab-list', style: { marginTop: 10 } }, s.history.map((x, i) => h('div', { key: i, className: 'ab-li' },
             h('div', { className: 'meta' }, timeAgo(x.at)),
-            h('div', { className: 'body' }, (x.ok ? '✓ ' : '✗ ') + x.title + (x.voice ? ' · ' + x.voice + (x.pitch ? ' ' + (x.pitch > 0 ? '+' : '') + x.pitch : '') : ''), h('div', { className: 'ab-muted ab-small' }, x.message))))) : null,
+            h('div', { className: 'body' }, (x.ok ? '✓ ' : '✗ ') + x.title + (x.voice ? ' · ' + x.voice + (x.pitch ? ' ' + (x.pitch > 0 ? '+' : '') + x.pitch : '') : ''), h('div', { className: 'ab-muted ab-small' }, (x.clip ? `第 ${x.clip.startSec} 秒起，最多 ${x.clip.durationSec} 秒 · ` : '') + x.message))))) : null,
         ),
       )
     }

@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { searchSongs, songUrl, account } from './netease.js'
 import { readZip } from './zip.js'
+import { SongClipError, validateSongClip, selectedWindow, clipCacheParts, clipLabel, clipFade } from './segment.js'
 
 export const APPLIO_REPO = 'https://github.com/IAHispano/Applio.git'
 export const APPLIO_COMMIT = 'c817f1f83f689ef72e0dfeb1c17ae990b9248506'
@@ -467,7 +468,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
       voice: cfg().voice,
       install: { ...install, log: install.log.slice(-30) },
       current: current ? { ...current } : null,
-      queue: queue.map((q) => ({ query: q.query, chatId: q.chatId })),
+      queue: queue.map((q) => ({ query: q.query, chatId: q.chatId, ...(q.clip ? { clip: q.clip } : {}) })),
       history: history.slice(0, 10),
       message: !voices.length ? '还没有音色：在下面「音色模型」里导入你有权使用的 RVC 模型（.pth 或 zip）' : ready ? (cfg().enabled ? '可以点歌了' : '准备好了，打开开关就能用') : '还差一些组件，点「一键安装」',
     }
@@ -790,10 +791,10 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   }
 
   /** 先截出要发的那一段再处理：分离和换声都只算这一段，快一倍多。返回 {file, cut, length}。 */
-  async function cutFirst(song, dir) {
+  async function cutFirst(song, dir, clip) {
     const c = cfg()
     const dur = await ffprobeDuration(song)
-    const w = clipWindow(dur, Number(c.maxVoiceSec) || 120, c.clipStart)
+    const w = clip ? selectedWindow(dur, clip) : clipWindow(dur, Number(c.maxVoiceSec) || 120, c.clipStart)
     if (!dur || (w.start === 0 && w.length >= dur)) return { file: song, cut: false, length: dur }
     const out = join(dir, 'part.wav')
     await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-ss', String(w.start), '-t', String(w.length), '-i', song, '-ar', '44100', out], { log })
@@ -804,7 +805,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   async function fade(mixed, dir, length) {
     const out = join(dir, 'voice.mp3')
     await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', mixed,
-      '-af', `afade=t=in:d=1.5,afade=t=out:st=${Math.max(0, length - 3)}:d=3`, '-b:a', '128k', out], { log })
+      '-af', clipFade(length), '-b:a', '128k', out], { log })
     return out
   }
 
@@ -817,16 +818,17 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     mkdirSync(dir, { recursive: true })
     current.stage = '下载歌曲'
     const song = job.file || (await download(job, dir))
+    current.title = job.title || job.query
     // 同一首歌、同一个音色、音高和截取方式做过的，直接复用
     // v2：0.6.2 起才检查有没有人声，之前缓存的可能是只有伴奏的成品，一律不用
-    const key = createHash('md5').update(['v2', job.songKey || song, local?.active('song') ? 'local:' + (voice?.id || '') : voice.id, pitch, c.maxVoiceSec, c.clipStart, ...(job.acapella ? ['acapella'] : [])].join('|')).digest('hex').slice(0, 16)
+    const key = createHash('md5').update(['v2', job.songKey || song, local?.active('song') ? 'local:' + (voice?.id || '') : voice.id, pitch, ...clipCacheParts(job.clip, c), ...(job.acapella ? ['acapella'] : [])].join('|')).digest('hex').slice(0, 16)
     const cached = join(work(), 'cache', key + '.mp3')
     if (existsSync(cached)) {
       log.info(`翻唱：「${job.title}」做过了，直接用缓存`)
       return { file: cached, voice: voice?.id, pitch, dir }
     }
     current.stage = '截取要唱的那一段'
-    const part = await cutFirst(song, dir)
+    const part = await cutFirst(song, dir, job.clip)
     current.stage = '分离人声和伴奏'
     const { vocals, inst } = await separate(part.file, dir)
     // 纯音乐 / 伴奏版分不出人声：换下一首候选重做，不然发出去只有伴奏
@@ -834,7 +836,9 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     if (vol < VOCAL_MIN_DB) {
       log.info(`翻唱：「${job.title}」几乎没有人声（${vol.toFixed(0)} dB），像是纯音乐`)
       try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
-      if (!job.file) markNoVocals(job.songKey)
+      if (job.clip) throw new SongClipError('这段没有检测到人声，可能是前奏或间奏；请换个开始位置或增加时长。')
+      // 仅凭一个片段不能认定整首歌没有人声。
+      if (!job.file && !part.cut) markNoVocals(job.songKey)
       if (job.file || job.songId) throw new Error('这首没有人声（像是纯音乐或伴奏版），换一首吧')
       job.skip = [...(job.skip || []), job.songKey]
       if (job.skip.length >= 3) throw new Error(`搜到的几版「${job.query}」都没有人声，换个说法试试（比如带上歌手名）`)
@@ -863,8 +867,8 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     }
     failNoticed.set(job.chatId, { at: now, why })
     // 模型那边彻底挂了也得让人听到一句，不能一声不吭；这句只是兜底，不是原来的模板
-    const plain = `「${title}」这次没唱成，回头再试试？`
-    if (!say) {
+    const plain = error instanceof SongClipError ? `「${title}」：${error.message}` : `「${title}」这次没唱成，回头再试试？`
+    if (!say || error instanceof SongClipError) {
       Promise.resolve(sendText?.(job.chatId, plain)).catch(() => {})
       return
     }
@@ -879,19 +883,19 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   async function pump() {
     if (current || !queue.length) return
     const job = queue.shift()
-    current = { query: job.query, title: job.query, chatId: job.chatId, stage: '排队', startedAt: Date.now() }
+    current = { query: job.query, title: job.query, chatId: job.chatId, stage: '排队', startedAt: Date.now(), ...(job.clip ? { clip: job.clip } : {}) }
     log.info(`翻唱开始：「${job.query}」→ ${job.chatId}`)
     try {
       const r = await process1(job)
       current.stage = '发送'
       await sendVoiceFile(job.chatId, r.file, `[${job.acapella ? '清唱' : '翻唱'}] ${job.title || job.query}`)
-      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ok: true, message: `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
+      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ...(job.clip ? { clip: job.clip } : {}), ok: true, message: `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
       log.info(`翻唱完成：「${job.title || job.query}」`)
       onSung?.(job.title || job.query, job.chatId)
       if (!cfg().keepWork) try { rmSync(r.dir, { recursive: true, force: true }) } catch (error) {}
     } catch (error) {
       const why = explainSongError(error.message)
-      history.unshift({ at: Date.now(), title: job.title || job.query, ok: false, message: why })
+      history.unshift({ at: Date.now(), title: job.title || job.query, ...(job.clip ? { clip: job.clip } : {}), ok: false, message: why })
       log.warn(`翻唱失败：「${job.query}」：`, error.message)
       // 说什么由她自己定：原来那句固定文案对谁、什么原因都一样，听着不像她说的
       noticeFail(job, error, why)
@@ -903,17 +907,19 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   }
 
   /** 点一首：马上返回，做好了自己发到聊天里。 */
-  function request({ song, songId, file, pitch, voice, chatId, acapella }) {
+  function request({ song, songId, file, pitch, voice, chatId, acapella, startSec, durationSec }) {
     const c = cfg()
     if (!c.enabled) return { ok: false, message: '翻唱还没打开（面板「翻唱」标签里开）' }
+    const selection = validateSongClip({ startSec, durationSec }, c.maxVoiceSec)
+    if (!selection.ok) return selection
     const st = status()
     if (!st.ready) return { ok: false, message: '翻唱环境还没装好：' + st.message }
     if (!song && !songId && !file) return { ok: false, message: '要说唱哪首歌' }
     if (queue.length >= 5) return { ok: false, message: '排队的歌太多了，等会儿再点' }
-    queue.push({ query: song || basename(file || ''), songId, file, pitch, voice, chatId, acapella: Boolean(acapella) })
+    queue.push({ query: song || basename(file || ''), songId, file, pitch, voice, chatId, acapella: Boolean(acapella), clip: selection.clip })
     const ahead = queue.length - 1 + (current ? 1 : 0)
     pump()
-    return { ok: true, message: `开始准备「${song || basename(file || '')}」，大概要两三分钟${ahead ? `（前面还有 ${ahead} 首）` : ''}，做好了会直接发语音` }
+    return { ok: true, message: `已接下「${song || basename(file || '')}」${selection.clip ? `（${clipLabel(selection.clip)}）` : ''}${ahead ? `，前面还有 ${ahead} 首` : ''}。制作时间取决于片段长度和电脑性能，做好会发语音。` }
   }
 
   return {

@@ -1,5 +1,6 @@
 // QQ 里的主人命令：/silent /active 之类，直接在 QQ 上管她。只认主人；在总开关关着时也能用（所以 /on 才有用）。
 
+import { parseSingRequest } from '../song/segment.js'
 import { runEffortCommand } from './effort-command.js'
 import { policyFor } from './group-policy.js'
 import { dataDir, readJson, writeJson } from '../core/store.js'
@@ -57,7 +58,7 @@ const COMMANDS = {
   normal: '这个群恢复默认的插话频率',
   model: '看或换她用的模型：/model 看列表，/model 2 或 /model 名字 换，/model 默认 跟随 DSH',
   effort: '查看当前聊天的模型思考档位；发 /effort 序号 或 档位名切换，/effort 默认恢复跟随',
-  sing: '让她翻唱一首：/sing 小幸运 田馥甄；后面加 +12 / -3 之类可以变调（原唱是男声一般 +12）',
+  sing: '让她翻唱一首：/sing 小幸运 田馥甄；可加 +12 变调，或 开始=60 时长=30 唱指定片段',
   status: '看她现在的状态',
   mood: '看她现在的心情',
   diary: '马上写一篇空间日记',
@@ -211,11 +212,10 @@ export async function runCommand(cmd, msg, deps) {
       return runEffortCommand(cmd.arg, msg, deps)
     case 'sing': {
       if (!deps.song) return '翻唱功能不可用'
-      // 末尾的 +12 / -3 是变调
-      const m = cmd.arg.match(/^(.*?)\s+([+-]\d{1,2})$/)
-      const name = (m ? m[1] : cmd.arg).trim()
-      if (!name) return '唱哪首？比如 /sing 小幸运 田馥甄'
-      return deps.song.request({ song: name, pitch: m ? Number(m[2]) : undefined, chatId: msg.chatId }).message
+      const request = parseSingRequest(cmd.arg)
+      if (request.error) return request.error
+      if (!request.song) return '唱哪首？比如 /sing 小幸运 田馥甄；只唱一段可加 开始=60 时长=30（秒）'
+      return deps.song.request({ ...request, chatId: msg.chatId }).message
     }
     case 'mood':
       return mood ? `现在${mood.label()}` : '心情模块关着'

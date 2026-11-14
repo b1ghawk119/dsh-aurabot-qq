@@ -12,7 +12,7 @@ export default {
   version: '1.0.0',
   description: '用她的声音翻唱一首歌，做好发语音条（qq_song_cover、/sing）',
   tab: 'song',
-  files: ['song/studio.js'],
+  files: ['song/studio.js', 'song/segment.js'],
   setup(api) {
     const { hub, local, http } = api.core
     const mood = api.lazy('mood')
@@ -51,13 +51,13 @@ export default {
     // 面板里打开了才给她（没开就别让她答应唱歌）
     api.tool(({ chat, sessionId }) => (api.config().song.enabled && chat.kind !== 'system' ? defineTool({
       name: 'qq_song_cover',
-      description: '用你自己的声音翻唱一首歌，做好后自动以语音条发到当前聊天（要两三分钟，调用后先简单回一句「等我一下」就好）。song 写歌名，最好带上歌手，比如「小幸运 田馥甄」。pitch 是变调半音：你是女声，原唱是男声时一般 +12，原唱是女声时 0。别人说清唱、不要伴奏时 acapella 填 true。',
-      properties: { song: str('歌名（可以带歌手）'), pitch: int('变调半音：原唱男声 +12，女声 0'), acapella: bool('清唱：只留人声，不要伴奏') },
+      description: '用你自己的声音翻唱一首歌，做好后自动以语音条发到当前聊天（耗时取决于长度和电脑性能，成功排队后再说已开始准备）。song 写歌名，最好带上歌手，比如「小幸运 田馥甄」。pitch 是变调半音：你是女声，原唱是男声时一般 +12，原唱是女声时 0。别人说清唱、不要伴奏时 acapella 填 true。只唱一段时用 start_sec 指定从第几秒开始，duration_sec 指定唱多少秒；只填时长则从头唱，两项都不填沿用面板截取设置，不能超过面板的最长时长。权限限制是限制谁能点歌，不是限制只能发到私聊；被拒时未开始制作。',
+      properties: { song: str('歌名（可以带歌手）'), pitch: int('变调半音：原唱男声 +12，女声 0'), acapella: bool('清唱：只留人声，不要伴奏'), start_sec: int('开始位置，整数秒，0 表示从头'), duration_sec: int('唱多少秒，正整数；不能超过面板最长时长') },
       required: ['song'],
       slow: '好，我这就去弄，稍等一会儿（做好了发你）。',
-      execute: async ({ song: name, pitch, acapella }) => {
-        if (api.config().song.ownerOnly && !hub.turnSendersAllOwner(sessionId) && !privateCapabilityAllowed(api.config(), chat, 'song')) return { ok: false, message: '你还没有获得点歌权限' }
-        return song.request({ song: name, pitch, acapella, chatId: chat.chatId })
+      execute: async ({ song: name, pitch, acapella, start_sec, duration_sec }) => {
+        if (api.config().song.ownerOnly && !hub.turnSendersAllOwner(sessionId) && !privateCapabilityAllowed(api.config(), chat, 'song')) return { ok: false, message: chat.kind === 'group' ? '本轮未通过点歌权限检查，未开始制作（合并了其他人的请求也会被拦）。主人可在本群直接发 /sing 歌名，或私聊点歌。' : '你还没有获得点歌权限' }
+        return song.request({ song: name, pitch, acapella, startSec: start_sec, durationSec: duration_sec, chatId: chat.chatId })
       },
     }) : []))
 
@@ -86,7 +86,7 @@ export default {
     // 面板里试唱：发到主人私聊
     api.route('/song/request', async (req) => {
       const b = await http.body(req)
-      return song.request({ song: b.song, songId: b.songId, pitch: b.pitch, voice: b.voice, chatId: b.chatId || `private:${api.config().ownerQQ}` })
+      return song.request({ song: b.song, songId: b.songId, pitch: b.pitch, voice: b.voice, startSec: b.startSec, durationSec: b.durationSec, chatId: b.chatId || `private:${api.config().ownerQQ}` })
     })
     return song
   },
@@ -126,7 +126,7 @@ export function cleanFailLine(text) {
     .replace(/\*\*/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-  if (!line || SILENT.test(line) || LEAK.test(line)) return ''
+  if (!line || SILENT.test(line) || LEAK.test(line) || /[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|\/[^\s/]+\//.test(line)) return ''
   if (line.length <= 60) return line
   // 太长就截到第一个句末；实在没有句末就硬截
   const cut = line.search(/[。！？!?~～]/)
