@@ -109,7 +109,7 @@ export const DEFAULTS = {
   },
   persona: { current: 'dafeiyu' },
   // 主人私聊里问起群里的事：把最近 24 小时的群聊流水补进这一轮（默认关，开启前先把群加进白名单）
-  group: { ...DEFAULT_GROUP_POLICY, overrides: {}, ownerTools: 'off', ownerToolsGroups: [], ownerBrief: { enabled: true, lines: 24, groups: [] } },
+  group: { ...DEFAULT_GROUP_POLICY, privateCommandsEnabled: true, overrides: {}, ownerTools: 'off', ownerToolsGroups: [], ownerBrief: { enabled: true, lines: 24, groups: [] } },
   // 按群头衔不回：勾选的群里，专属头衔正好是 title 的成员（一般是别的机器人）说话、戳她都不理。没勾群就不起作用
   titleFilter: { enabled: true, groups: [], title: '大肥鱼' },
   voice: {
@@ -546,6 +546,7 @@ export function normalize(raw) {
   c.files.dirs = (Array.isArray(c.files.dirs) ? c.files.dirs : String(c.files.dirs || '').split(/[\n,，;；]+/))
     .map((s) => String(s).trim()).filter((s) => /^([a-zA-Z]:[\\/]|\/)/.test(s)).slice(0, 20)
   const g = c.group
+  g.privateCommandsEnabled = bool(g.privateCommandsEnabled, true)
   g.wakeWords = (Array.isArray(g.wakeWords) ? g.wakeWords : String(g.wakeWords || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.proactiveEnabled = bool(g.proactiveEnabled, true)
   g.engagedEnabled = typeof g.engagedEnabled === 'boolean' ? g.engagedEnabled : null

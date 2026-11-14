@@ -473,8 +473,8 @@ export function apply(ctx) {
         if (cmd.ext.sensitive === true && !markSensitive(cmd.name)) return ''
         return String((await cmd.ext.run(cmd.arg, msg)) ?? '')
       }
-      if (cmd.name === 'permissions' && !markSensitive(cmd.name)) return ''
-      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, reasoningFor: (provider, model) => modelReasoning(ctx, provider, model, { refresh: true }), defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
+      if (['permissions', 'groupsettings'].includes(cmd.name) && !markSensitive(cmd.name)) return ''
+      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, onebot, ownerStillCurrent, log: logger, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, reasoningFor: (provider, model) => modelReasoning(ctx, provider, model, { refresh: true }), defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
     },
     isMuted: (chatId) => mutes.muted(chatId),
     moodEffects: () => use('mood')?.effects?.() ?? null,
