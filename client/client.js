@@ -2174,6 +2174,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('input', { className: 'ab-input sm', type: 'number', min: 0, max: 23, value: draft.group.quietHours[1], onChange: (e) => setDraft(setPath(draft, 'group.quietHours', [draft.group.quietHours[0], Number(e.target.value)])) }),
             h('span', { className: 'ab-muted' }, '点')),
         ),
+        h(Card, { title: '主人私聊：群设置指令', right: f.sw('group.privateCommandsEnabled', { title: '群设置指令总开关' }),
+          desc: '私聊发 /群设置 查看用法。直接执行，不经过模型；批量修改先预览，再确认。' },
+          h('div', { className: 'ab-muted ab-small' }, '只控制 /群设置，不影响自然语言管理、/权限 或群内的 /quiet。关闭自然语言管理，可在「权限」页关闭「改白名单」。')),
         h(Card, { title: '按群单独设置', desc: '想只接话、不主动凑热闹：第一项选关，第二项选开。只对白名单群生效；被 @ 等明确叫到时仍按原规则回复。' },
           Object.keys(overrides).length === 0 ? h('div', { className: 'ab-muted', style: { marginBottom: 10 } }, '所有群都跟随上面的默认设置。') :
             Object.entries(overrides).map(([gid, raw]) => {

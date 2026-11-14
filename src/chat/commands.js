@@ -3,6 +3,7 @@
 import { runEffortCommand } from './effort-command.js'
 import { policyFor } from './group-policy.js'
 import { dataDir, readJson, writeJson } from '../core/store.js'
+import { runGroupSettingsCommand } from './group-settings-command.js'
 import { runPermissionsCommand } from './permissions-command.js'
 
 /**
@@ -15,6 +16,7 @@ export function parseCommand(text, extra = []) {
   const word = m[1].toLowerCase()
   // 权限管理是保留命令，扩展模块不能抢占。
   if (word === '权限' || word === 'permissions' || word === 'perms') return { name: 'permissions', arg: m[2].trim() }
+  if (word === 'groupsettings' || word.startsWith('群设置')) return { name: 'groupsettings', arg: (word === 'groupsettings' ? m[2] : m[1].slice(3) + ' ' + m[2]).trim() }
   for (const c of extra) {
     const names = [c.name, ...(c.aliases || [])].map((x) => String(x).toLowerCase())
     if (names.includes(word)) return { name: c.name, arg: m[2].trim(), ext: c }
@@ -30,6 +32,7 @@ export function parseCommand(text, extra = []) {
 }
 
 const ALIASES = {
+  群设置: 'groupsettings',
   闭嘴: 'silent', 安静: 'silent', 静音: 'silent', shutup: 'silent', mute: 'silent',
   说话: 'active', 醒醒: 'active', 解除静音: 'active', unmute: 'active',
   少说: 'quiet', 话少: 'quiet',
@@ -46,6 +49,7 @@ const ALIASES = {
 const COMMANDS = {
   help: '看这份命令列表',
   permissions: '主人私聊管理权限：/权限 查看用法',
+  groupsettings: '主人私聊管理群发言和记忆：/群设置 查看用法',
   silent: '在这里闭嘴（可带分钟数，如 /silent 30；不带就一直到 /active）',
   active: '解除闭嘴；在群里还会接着参与话题一会儿',
   quiet: '这个群里只在被叫到时说话，不插话',
@@ -117,6 +121,8 @@ export async function runCommand(cmd, msg, deps) {
     setConfig({ ...cfg, group: { ...cfg.group, overrides } })
   }
   switch (cmd.name) {
+    case 'groupsettings':
+      return runGroupSettingsCommand(cmd.arg, msg, deps)
     case 'permissions':
       return runPermissionsCommand(cmd.arg, msg, deps)
     case 'help':
