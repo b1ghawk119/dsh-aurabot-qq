@@ -36,7 +36,7 @@ import { dataDir, ensureDir } from './core/store.js'
 import { initUsage, usageReport } from './core/usage.js'
 import { createUpdateChecker, changelogSection, hostEnv, updatePlan, repoOf } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
-import { isOwner } from './chat/access.js'
+import { isOwner, groupResponseMode } from './chat/access.js'
 import { changePermissions, changePrivateWhitelist, privatePermissionCatalog } from './chat/permission-policy.js'
 import { canUseDelegatedCommand, delegatedCommandKey, runPersonalModelCommand } from './chat/delegated-commands.js'
 import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaText, rulesText, seedPersonas, safeId, dataOwner, claimPending, hasRootData, personaDataDir } from './persona/personas.js'
@@ -342,7 +342,8 @@ export function apply(ctx) {
   async function flushOutbox () {
     if (onebotState !== 'connected' || !loginOk) return
     try {
-      const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }))
+      const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }),
+        item => !item.incomingReply || item.action !== 'send_group_msg' || groupResponseMode(cfg, item.params?.group_id) === 'chat')
       if (r.sent || r.dropped || r.left) log.info(`补发队列：成功 ${r.sent}，丢弃 ${r.dropped}，剩余 ${r.left}`)
     } catch (error) {
       logger.child('onebot').warn('补发队列出错：', error.message)
@@ -1259,9 +1260,15 @@ export function apply(ctx) {
         ok: false, code: 'invalid_passive_groups', message: '旁听名单请填 5～12 位数字群号，用换行或逗号分隔，不要混入文字。本次没有保存。',
       }
     }
+    for (const ids of [body?.group?.moduleOnlyGroups, ...(body?._groupSettingsBase?.groups ? [body?.allow?.groups] : [])]) {
+      if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id))))) return {
+        ok: false, code: 'invalid_group_ids', message: '群号请填 5～12 位数字，不要混入文字。本次没有保存。',
+      }
+    }
     const expected = body?._groupSettingsBase
     if (body) delete body._groupSettingsBase
     if (expected && (
+      (Object.hasOwn(expected, 'groups') && !isDeepStrictEqual(expected.groups, cfg.allow.groups)) ||
       (Object.hasOwn(expected, 'group') && !isDeepStrictEqual(expected.group, cfg.group)) ||
       (Object.hasOwn(expected, 'passiveGroups') && !isDeepStrictEqual(expected.passiveGroups, cfg.memory.passiveGroups))
     )) return { ok: false, code: 'group_settings_conflict', message: '群聊或旁听设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' }

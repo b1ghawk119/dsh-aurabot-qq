@@ -1945,11 +1945,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const id = input.trim()
       const groups = st.config.allow.groups
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '群白名单', desc: '机器人只在白名单中的群聊响应消息。' },
+        h(Card, { title: '群白名单', desc: '机器人只在白名单中的群聊响应消息。仅模块群不会触发 AI 接话；要切换模式，到「聊天 → 按群单独设置」。' },
           h('div', { className: 'ab-flex' },
             h('input', { className: 'ab-input', 'aria-label': '群号', placeholder: '输入群号', inputMode: 'numeric', value: input, onChange: (e) => setInput(e.target.value) }),
             h(Btn, { kind: 'primary', disabled: busy || !/^\d{5,}$/.test(id) || groups.includes(id), onClick: async () => { if (await apply(id, 'group', { chat: true })) setInput('') } }, '添加群聊')),
-          groups.map((qq) => h(Row, { key: qq, label: qq }, h(Btn, { small: true, disabled: busy, onClick: () => apply(qq, 'group', { chat: false }) }, '移除'))),
+          groups.map((qq) => h(Row, { key: qq, label: qq, hint: (st.config.group.moduleOnlyGroups || []).includes(qq) ? '仅模块' : '允许 AI 聊天' }, h(Btn, { small: true, disabled: busy, onClick: () => apply(qq, 'group', { chat: false }) }, '移除'))),
         ),
         modOn(st, 'group-admin') ? h(GroupRoles, null) : null,
       )
@@ -2117,6 +2117,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     function Group({ draft, setDraft }) {
       const f = useField(draft, setDraft)
       const overrides = draft.group.overrides || {}
+      const groupIds = [...new Set([...draft.allow.groups, ...(draft.group.moduleOnlyGroups || []), ...Object.keys(overrides)])]
       const [newGid, setNewGid] = useState('')
       const groupId = newGid.trim()
       const validGroupId = /^[1-9]\d{4,11}$/.test(groupId)
@@ -2143,7 +2144,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Row, { label: '只在这些群生效', hint: '一行一个群号；留空 = 白名单里所有群都生效' }, f.list('group.ownerToolsGroups', { placeholder: '100200300' })),
           ] : []),
         }),
-        h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复ta的消息、或者提到下面这些名字时，ta一定会回。' },
+        h(Card, { title: '群里什么时候必回', desc: '群模式为「允许 AI 聊天」时，被 @、引用回复或叫名字会触发回复，仍受总开关、暂停和次数限制。' },
           h(Row, { label: '能不能看别的群', hint: '只读白名单里的群，一次最多 50 条，主人随时能看。开到「群里也行」后，ta在 A 群的回答全群都看得到，里面可能有不在 B 群的人；读到的内容也会留在这个会话里。' }, f.choices('group.crossRead', [{ value: 'off', label: '关', desc: '只看当前聊天' }, { value: 'private', label: '私聊可以', desc: '主人，以及私聊里问的人本身在那个群（默认）' }, { value: 'group', label: '群里也行', desc: '再加上群里问的人都在那个群' }])),
           h(Row, { label: '@ 了别人不算叫ta', hint: '有人 @ 别人时顺口提到ta的名字，不算在叫ta；ta还是可以按平时的频率插话。默认关' }, f.sw('group.ignoreAtOthers')),
           h(Row, { label: '新会话先补看聊天记录', hint: '会话第一次开口时先读最近几条，接得上话。默认关' }, f.sw('chat.seedHistory')),
@@ -2177,9 +2178,19 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Card, { title: '主人私聊：群设置指令', right: f.sw('group.privateCommandsEnabled', { title: '群设置指令总开关' }),
           desc: '私聊发 /群设置 查看用法。直接执行，不经过模型；批量修改先预览，再确认。' },
           h('div', { className: 'ab-muted ab-small' }, '只控制 /群设置，不影响自然语言管理、/权限 或群内的 /quiet。关闭自然语言管理，可在「权限」页关闭「改白名单」。')),
-        h(Card, { title: '按群单独设置', desc: '想只接话、不主动凑热闹：第一项选关，第二项选开。只对白名单群生效；被 @ 等明确叫到时仍按原规则回复。' },
-          Object.keys(overrides).length === 0 ? h('div', { className: 'ab-muted', style: { marginBottom: 10 } }, '所有群都跟随上面的默认设置。') :
-            Object.entries(overrides).map(([gid, raw]) => {
+        h(Card, { title: '按群单独设置', desc: '先选群响应模式。仅模块可保留 #表情 等功能，@ 也不触发 AI。允许 AI 聊天后，再调主动和窗口接话。记忆、定时推送及各模块权限另按原设置。' },
+          groupIds.length === 0 ? h('div', { className: 'ab-muted', style: { marginBottom: 10 } }, '输入群号后选择模式；添加一行不会自动开放聊天。') :
+            groupIds.map((gid) => {
+              const raw = overrides[gid]
+              const mode = !draft.allow.groups.includes(gid) ? 'off' : (draft.group.moduleOnlyGroups || []).includes(gid) ? 'modules' : 'chat'
+              const changeMode = value => {
+                const n = clone(draft)
+                n.allow.groups = value === 'off' ? n.allow.groups.filter(x => x !== gid) : [...new Set([...n.allow.groups, gid])]
+                const restricted = n.group.moduleOnlyGroups || []
+                n.group.moduleOnlyGroups = value === 'chat' ? restricted.filter(x => x !== gid) : value === 'modules' ? [...new Set([...restricted, gid])] : restricted
+                n.group.overrides[gid] = { ...o }
+                setDraft(n)
+              }
               const o = raw && typeof raw === 'object' ? raw : {}
               const chance = o.interjectChance ?? draft.group.interjectChance
               const proactive = (o.proactiveEnabled ?? draft.group.proactiveEnabled) !== false && chance > 0
@@ -2193,13 +2204,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               }
               return h('div', { key: gid, style: { borderTop: '1px solid var(--ab-line)', paddingTop: 10, marginTop: 10 } },
                 h('div', { className: 'ab-flex' }, h('b', null, '群 ' + gid), h('div', { className: 'ab-spacer' }),
-                  h(Btn, { small: true, kind: 'ghost', onClick: () => { const n = { ...overrides }; delete n[gid]; setDraft(setPath(draft, 'group.overrides', n)) } }, '恢复跟随默认')),
+                  h(Btn, { small: true, kind: 'ghost', onClick: () => { const n = { ...overrides }; delete n[gid]; setDraft(setPath(draft, 'group.overrides', n)) } }, '恢复接话默认')),
+                h(Row, { label: '群响应模式' }, h(Select, { ariaLabel: '群 ' + gid + ' 响应模式', value: mode,
+                  options: [{ value: 'off', label: '不响应群消息' }, { value: 'modules', label: '仅模块' }, { value: 'chat', label: '允许 AI 聊天' }], onChange: changeMode })),
+                mode !== 'chat' ? h('div', { className: 'ab-note' }, mode === 'modules' ? '模块照常工作；以下 AI 接话设置暂不生效。' : '未加入白名单，群消息不触发模块或 AI；以下接话设置暂不生效。') : null,
                 ...[['proactiveEnabled', '主动加入话题'], ['engagedEnabled', '窗口内接话']].map(([key, label]) =>
                   h(Row, { key, label }, h(Select, { ariaLabel: '群 ' + gid + ' ' + label, value: typeof o[key] === 'boolean' ? (o[key] ? 'on' : 'off') : '',
                     options: [{ value: '', label: '跟随默认' }, { value: 'on', label: '开' }, { value: 'off', label: '关' }], onChange: (v) => change(key, v) }))),
                 h('div', { className: 'ab-muted ab-small' }, `这组设置：${proactive ? '允许主动加入' : '不主动加入'}；${engaged ? '允许窗口内接话' : '不在窗口内接话'}`),
                 chance === 0 ? h('div', { className: 'ab-note warn' }, '插话概率为 0，不会主动加入。要恢复主动插话，请把下方概率调高；只想接话则单独打开窗口内接话。') : null,
-                !draft.allow.groups.includes(gid) ? h('div', { className: 'ab-note warn' }, '该群不在聊天白名单，这里的接话设置暂不生效。') : null,
                 h(Row, { label: '主动加入的概率', hint: '留空跟随默认；0 表示不主动加入。窗口内接话可单独打开。' },
                   h('input', { className: 'ab-input sm', 'aria-label': '群 ' + gid + ' 插话概率', type: 'number', min: 0, max: 100,
                     placeholder: String(pct(draft.group.interjectChance)), value: o.interjectChance == null ? '' : pct(o.interjectChance),
@@ -2207,7 +2220,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                   h('span', { className: 'ab-muted' }, '%')))
             }),
           h('div', { className: 'ab-flex', style: { marginTop: 12 } }, h('input', { className: 'ab-input', 'aria-label': '单独设置的群号', placeholder: '输入一个群号', inputMode: 'numeric', value: newGid, onChange: (e) => setNewGid(e.target.value) }),
-            h(Btn, { small: true, disabled: !validGroupId || Object.hasOwn(overrides, groupId), onClick: () => { setDraft(setPath(draft, 'group.overrides', { ...overrides, [groupId]: {} })); setNewGid('') } }, '添加群')),
+            h(Btn, { small: true, disabled: !validGroupId || groupIds.includes(groupId), onClick: () => { setDraft(setPath(draft, 'group.overrides', { ...overrides, [groupId]: {} })); setNewGid('') } }, '添加群')),
           newGid && !validGroupId ? h('div', { className: 'ab-note warn', role: 'alert' }, '请一次填一个 5～12 位数字群号，不要混入文字。') : null,
         ),
         h(Card, { title: '非白名单群：只旁听记忆', desc: '额外记住这些非白名单群的新文字，但不回复。留空表示不额外旁听；白名单群不受这里影响。' },
@@ -8791,6 +8804,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         // 未编辑的群设置不回写；编辑过的带上草稿基线，避免悄悄撤销 QQ 命令。
         const baseline = draftBaseRef.current || st.config
         const expected = {}
+        if (JSON.stringify(allow?.groups) !== JSON.stringify(baseline.allow?.groups)) {
+          body.allow = { groups: allow.groups }
+          expected.groups = baseline.allow.groups
+        }
+        if (JSON.stringify(body.group?.moduleOnlyGroups) !== JSON.stringify(baseline.group?.moduleOnlyGroups)) expected.groups = baseline.allow.groups
         if (JSON.stringify(body.group) === JSON.stringify(baseline.group)) delete body.group
         else expected.group = baseline.group
         if (JSON.stringify(body.memory?.passiveGroups) === JSON.stringify(baseline.memory?.passiveGroups)) {

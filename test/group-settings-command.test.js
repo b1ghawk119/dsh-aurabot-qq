@@ -148,9 +148,9 @@ test('保存异常不给聊天泄露路径/堆栈，不把失败说成成功', a
 test('查询按群分段，单群保留限制，批量回执逐项列出改动', async () => {
   const x = setup({group:{quietHours:[0,0], overrides:{[G]:{proactiveEnabled:false,engagedEnabled:true}}},memory:{enabled:true,passiveGroups:[H]}})
   const all=await x.run('查看 全部')
-  assert.match(all,/甲（30000003）\n白名单：在/)
+  assert.match(all,/甲（30000003）\n模式：允许 AI 聊天\n白名单：在/)
   assert.match(all,/主动：关（基础 15%）；窗口：开\n记忆：开（白名单群规则）/)
-  assert.match(all,/\n\n乙（40000004）\n白名单：不在/)
+  assert.match(all,/\n\n乙（40000004）\n模式：不响应群消息\n白名单：不在/)
   assert.match(all,/旁听新文字/)
   const one=await x.run(`查看 ${G}`)
   assert.match(one,/主动插话：关/);assert.match(one,/窗口接话：开/)
@@ -170,4 +170,22 @@ test('总开关、试运行、暂停、静默和零次数限制不能被简短�
   assert.match(text,/已暂停/);assert.match(text,/\/active/);assert.match(text,/次数上限为 0/);assert.match(text,/01:00–08:00/)
   const y=setup({memory:{enabled:false,passiveGroups:[H]}})
   assert.match(await y.run(`查看 ${H}`),/记忆总开关关闭/)
+})
+
+test('单群和批量模式确定执行，冲突参数不猜；恢复默认保留模式', async () => {
+  const x = setup()
+  assert.match(await x.run(`修改 ${G} 模式 仅模块`), /群响应模式：仅模块/)
+  assert.deepEqual(x.cfg().group.moduleOnlyGroups, [G])
+  assert.match(await x.run(`查看 ${G}`), /AI 不接话/)
+  const before = structuredClone(x.cfg())
+  for (const s of ['模式 任意', '模式 仅模块 白名单 开', '模式 仅模块 模式 允许AI聊天']) {
+    assert.match(await x.run(`修改 ${G} ${s}`), /未修改/)
+    assert.deepEqual(x.cfg(), before)
+  }
+  await x.run(`恢复 ${G}`); assert.deepEqual(x.cfg().group.moduleOnlyGroups, [G])
+  const p = await x.run(`修改 ${G},${H} 模式 不响应群消息`)
+  assert.match(p, /尚未修改/); assert.match(p, /模式 不响应群消息/)
+  await x.run(confirm(p)); assert.deepEqual(x.cfg().allow.groups, [])
+  await x.run(`修改 ${G} 模式 允许AI聊天`)
+  assert.deepEqual(x.cfg().allow.groups, [G]); assert.deepEqual(x.cfg().group.moduleOnlyGroups, [])
 })

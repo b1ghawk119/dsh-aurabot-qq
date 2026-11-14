@@ -550,6 +550,7 @@ export function normalize(raw) {
     .map((s) => String(s).trim()).filter((s) => /^([a-zA-Z]:[\\/]|\/)/.test(s)).slice(0, 20)
   const g = c.group
   g.privateCommandsEnabled = bool(g.privateCommandsEnabled, true)
+  g.moduleOnlyGroups = qqList(g.moduleOnlyGroups)
   g.wakeWords = (Array.isArray(g.wakeWords) ? g.wakeWords : String(g.wakeWords || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.proactiveEnabled = bool(g.proactiveEnabled, true)
   g.engagedEnabled = typeof g.engagedEnabled === 'boolean' ? g.engagedEnabled : null

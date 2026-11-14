@@ -15,7 +15,7 @@ import { isDefiniteFailure } from '../onebot/client.js'
 import { parseMessageEvent, gifFrames, segmentsOf } from './inbound.js'
 import { parseReply, bubbleDelay, wantsVoice, itemsToLine, cleanOutboundText, cleanOutboundSegments, capOutboundSegments, clockLabel } from './reply.js'
 import { decideGroupReply, engagedHint, pickAutoReply, pickDirectRequester, policyFor, sameNameNote, topicRelevance } from './group-policy.js'
-import { checkAllowed, shouldObserveGroup, levelFor, presetFor, isOwner, groupOwnerTools } from './access.js'
+import { checkAllowed, groupResponseMode, shouldObserveGroup, levelFor, presetFor, isOwner, groupOwnerTools } from './access.js'
 import { fetchImage, segmentBytes } from '../core/net.js'
 import { toMono16k } from '../voice/wav.js'
 import { asrConfigured, transcribeAudio } from '../voice/asr.js'
@@ -1050,7 +1050,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
               ...base,
               async execute(args, exec) {
                 let fired = false
-                const isCurrent = () => !disposed && running.has(chat.chatId)
+                const incomingReply = Boolean(turnState.get(sid)?.turnToken)
+                const isCurrent = () => !disposed && running.has(chat.chatId) && (!incomingReply || groupChatAllowed(chat.chatId))
                 const timer = setTimeout(() => {
                   slowTimers.delete(timer)
                   if (fired) return
@@ -1143,6 +1144,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
   async function sendSegments(chatId, message, note, opts = {}) {
     const { force = false, isCurrent = null, throwOnError = false, timeoutMs, quiet = false, queueKind = 'reply', queueTtlMs, sensitive = false } = opts
     if (disposed) return null
+    const replyCurrent = () => outputScope.getStore()?.chatId !== chatId || !outputScope.getStore()?.incomingReply || groupChatAllowed(chatId)
+    if (!replyCurrent()) return null
     // 出口层第二道保险：模块直接调 scopedHub.sendSegments/sendImage/sendFile/sendFile 时也要过门闸。
     // 只认带 sourceModule（模块发起）或 enginePolicy（引擎路径）的请求；hub 内部发送不带这两个标记，行为不变。
     // outboundVerdict：逻辑入口（sendText / deliver）已经判过了，这里不重复判，但由真实出口处结算。
@@ -1186,7 +1189,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       log.warn(`出站正文超长，已截断 → ${chatId}：${capped.total} 字 → ${kept} 字`)
       message = capped.message
     }
-    if (!message.length || disposed || (isCurrent && !isCurrent())) return settleOutboundFailed(verdict)
+    if (!message.length || disposed || !replyCurrent() || (isCurrent && !isCurrent())) return settleOutboundFailed(verdict)
     const cap = captureStore.getStore()
     if (cap) {
       cap.push({ chatId, note, message })
@@ -1225,7 +1228,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       // 网关预热/短暂不可达：确定没发出去的消息放进补发队列，连上后按 TTL 补发。
       // 超时（uncertain）不入队，避免同一条消息发两次。
       if (!sensitive && outbox && isDefiniteFailure(error)) {
-        const q = outbox.add({ action, params, chatId, note, kind: queueKind, ttlMs: queueTtlMs })
+        const q = outbox.add({ action, params, chatId, note, kind: queueKind, ttlMs: queueTtlMs, incomingReply: outputScope.getStore()?.chatId === chatId && Boolean(outputScope.getStore()?.incomingReply) })
         if (q.ok) {
           log.warn(`发到 ${chatId} 时网关还没就绪，已排队补发：${note || error.message}`)
           recordDeliveryTypes(chatId, message, true)
@@ -1574,10 +1577,11 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
 
   /** 一轮回复落地：拆条、语音、表情。 */
   function deliver(chatId, text, opts = {}) {
+    if (opts.incomingReply && !groupChatAllowed(chatId)) return Promise.resolve({ silent: true })
     const active = currentPromptSources()
     const current = active || outputSources.get(chatId)
     const sources = current && { ...current, system: new Map(current.system), memory: [...current.memory] }
-    return outputScope.run({ chatId, sources, sent: 0, sentTypes: new Set(), queuedTypes: new Set(), blocked: false, allowPromptEcho: false }, () => deliverWithEnginePolicy(chatId, text, opts))
+    return outputScope.run({ chatId, sources, incomingReply: Boolean(opts.incomingReply), sent: 0, sentTypes: new Set(), queuedTypes: new Set(), blocked: false, allowPromptEcho: false }, () => deliverWithEnginePolicy(chatId, text, opts))
   }
 
   /**
@@ -1840,7 +1844,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
           // 这里再记一次会让每个中间段在聊天流水里出现两遍，发送失败时还会把没发出去的话算成说过。
           log.debug(`${chatId}：分条发出上一段（${prev.length} 字）`)
           const onDelivered = st.onDelivered
-          chainSend(chatId, () => deliver(chatId, prev, { own: true, interim: true, onDelivered }), '分条发送出错：')
+          const incomingReply = Boolean(st.turnToken)
+          chainSend(chatId, () => deliver(chatId, prev, { own: true, interim: true, onDelivered, incomingReply }), '分条发送出错：')
         }
       }
       return
@@ -1956,7 +1961,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       // 发完再放开：发送期间来的消息也攒到下一段。
       // 没有中间段在发的时候就走原来的路径（同步开始、release 跟着这一条走），时序和以前一模一样；
       // 只有前面真有中间段没发完时才排队，保证最后一段一定是最后一条（#214 review）。
-      const sendLast = () => deliver(chatId, text, { wantVoice, autoReply, userText: st.lastText || '', own: true, onDelivered, fromThinking })
+      const sendLast = () => deliver(chatId, text, { wantVoice, autoReply, userText: st.lastText || '', own: true, onDelivered, fromThinking, incomingReply: Boolean(turnToken) })
         .then((result) => {
           try {
             onTurnEnd?.({
@@ -2426,7 +2431,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     // 群里的语音：先异步转写，结果补进 groupBuf。以前只有「这一条要回」时才转，
     // 所以没 @ 的语音永远是空文本，后面的 @ 也看不到它（#197）。
     // 不阻塞这一条消息的群聊判断；真要交给她时（groupPrompt / 这一条要回）再等结果。
-    if (msg.kind === 'group' && groupEntry && cfg.voice.asr && msg.records.length) {
+    if (msg.kind === 'group' && groupResponseMode(getConfig(), msg.groupId) === 'chat' && groupEntry && cfg.voice.asr && msg.records.length) {
       groupEntry.voicePromise = transcribe(msg)
         .then((t) => {
           if (t) {
@@ -2454,6 +2459,11 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       }
     }
     if (disposed || wasCleared()) return
+
+    if (msg.kind === 'group' && groupResponseMode(getConfig(), msg.groupId) !== 'chat') {
+      logIncoming() // 响应模式不改变白名单群原有的文字记忆记录。
+      return
+    }
 
     // 贴表情和「回不回复」分家：她可以只看不说话，顺手给这条消息贴一个表情。
     // 放在群聊「要不要插话」的判定之前，所以不回复也会贴；闭嘴（isMuted）时不贴。
@@ -2612,6 +2622,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     }
     if (disposed) return
     const group = ev.group_id ? String(ev.group_id) : ''
+    if (group && groupResponseMode(getConfig(), group) !== 'chat') return
     const poker = String(group ? ev.user_id : ev.sender_id ?? ev.user_id)
     if (!poker || poker === self) return
     if (group && await titleFilter.shouldIgnore({ group_id: group, user_id: poker })) return
@@ -2778,9 +2789,12 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     }
     return true
   }
+  function groupChatAllowed(chatId) {
+    return !chatId.startsWith('group:') || groupResponseMode(getConfig(), chatId.slice(6)) === 'chat'
+  }
   function checkTurn(chatId, token) {
     assertActive()
-    if (token && (busyTurns.get(chatId) !== token || token.signature !== turnSignature(chatId))) {
+    if (token && (!groupChatAllowed(chatId) || busyTurns.get(chatId) !== token || token.signature !== turnSignature(chatId))) {
       throw new Error('会话模式已切换，取消旧轮次提交')
     }
   }
@@ -2826,6 +2840,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
   }
 
   function enqueue(chat, content, senderId, wantVoice, mode = 'must', extra = {}) {
+    if (!groupChatAllowed(chat.chatId)) return
     const m = getConfig().merge
     const p = pending.get(chat.chatId) || { chat, texts: [], images: [], senders: new Set(), wantVoice: false, timer: null, firstAt: Date.now(), mode, count: 0 }
     p.chat = chat
@@ -2881,6 +2896,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     const p = pending.get(chatId)
     if (!p) return
     clearTimeout(p.timer)
+    if (!groupChatAllowed(chatId)) { pending.delete(chatId); return }
     // 「她挑」的提示统一在这里补：私聊、群聊、插话三条路都要带上
     const hint = p.stickerPick ? '\n\n' + stickerHint(p.stickerPick) : ''
     // 私聊：她这一轮还在跑（想 / 调工具），新消息直接 steer 进当前这一轮，像在 DSH 界面里插话一样（#7）
@@ -3150,6 +3166,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     for (const block of admitted.filter((c) => c.type === 'text')) {
       for (const r of memoryPromptRanges(block.text, { toEndOfText: true })) sources.memory.push(block.text.slice(r.start, r.end))
     }
+    // 私聊 steer 准备期间原轮次可能已结束：允许沿用既有 followup 回退，这里只复查群响应模式。
+    if (turnToken && !groupChatAllowed(chat.chatId)) throw new Error('群响应模式已切换，取消旧群消息提交')
     assertActive(); opts.assertAuthorized?.(); assertMemoryCurrent()
     startTyping(key, chat)
     if (chat.kind !== 'system' && getConfig().conversationContext?.enabled === true) {

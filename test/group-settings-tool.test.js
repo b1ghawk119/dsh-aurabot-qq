@@ -241,3 +241,14 @@ test('取群列表失败不冒充全群结果、不泄露路径；等待期间�
   r = await s.tool.execute({ action: 'list' }); assert.equal(r.ok, false); assert.equal(r.groups, undefined)
   assert.equal(s.saves(), 0)
 })
+
+test('模式工具操作、单群和全群查询一致，恢复默认不重新开放 AI', async () => {
+  const s = setup()
+  let r = await call(s, { mode: 'modules' })
+  assert.equal(r.ok, true); assert.equal(r.state.response_mode, 'modules'); assert.equal(r.state.can_reply_by_settings, false)
+  s.api.core.onebot = { call: async () => [{ group_id: G, group_name: '测试' }] }
+  r = await s.tool.execute({ action: 'list' })
+  assert.equal(r.groups[0].response_mode, 'modules'); assert.match(r.message, /仅模块/)
+  await call(s, { action: 'reset' }); assert.deepEqual(s.cfg().group.moduleOnlyGroups, [G])
+  await call(s, { mode: 'chat' }); assert.equal((await read(s)).state.response_mode, 'chat')
+})

@@ -94,3 +94,18 @@ test('旁听名单混入文字、斜杠或连写多个号码时整次拒绝，�
   assert.notEqual((await save({ memory: { passiveGroups: '30000003，40000004' } })).ok, false)
   assert.deepEqual(app.getConfig().memory.passiveGroups, ['30000003', '40000004'])
 })
+
+test('模式同时改白名单和 AI 限制；旧草稿不能覆盖另一个入口的加白', async () => {
+  const old = snapshot()
+  app.setConfig({ ...old, allow: { ...old.allow, groups: [G] } })
+  const current = snapshot()
+  let r = await save({ allow: { groups: [] }, group: { moduleOnlyGroups: [G] }, _groupSettingsBase: { groups: old.allow.groups } })
+  assert.equal(r.code, 'group_settings_conflict'); assert.deepEqual(snapshot(), current)
+  r = await save({ allow: { groups: [G] }, group: { moduleOnlyGroups: [G] }, _groupSettingsBase: { groups: current.allow.groups, group: current.group } })
+  assert.notEqual(r.ok, false); assert.deepEqual(app.getConfig().group.moduleOnlyGroups, [G])
+  const before = snapshot()
+  for (const value of [null, ['群30000003'], ['30000003/40000004']]) {
+    r = await save({ group: { moduleOnlyGroups: value }, enabled: !before.enabled })
+    assert.equal(r.code, 'invalid_group_ids'); assert.deepEqual(snapshot(), before)
+  }
+})

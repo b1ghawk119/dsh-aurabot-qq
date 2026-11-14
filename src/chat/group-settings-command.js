@@ -1,7 +1,7 @@
 // 确定性主人私聊入口；配置和自然语言工具共用规划器，不通过 LLM 执行。
 import { randomInt } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { isOwner } from './access.js'
+import { isOwner, GROUP_RESPONSE_LABELS } from './access.js'
 import { DEFAULT_GROUP_POLICY } from './group-policy.js'
 import { changePermissions } from './permission-policy.js'
 import { planGroupSettings, readSettings } from '../modules/contacts/group-settings.js'
@@ -17,16 +17,18 @@ const HELP = [
   '/群设置 修改 123456789 主动 关',
   '主动＝没人叫时插话；窗口＝聊起来后继续接话。',
   '可改：主动、窗口、旁听、白名单；后面填 开 或 关。',
+  '/群设置 修改 123456789 模式 仅模块',
+  '模式可填：不响应群消息、仅模块、允许AI聊天。仅模块时 @ 也不触发 AI。',
   '',
   '批量改（先预览，再确认）',
   '/群设置 修改 123456789,987654321 旁听 开',
   '群号也可填 全部；放弃用 /群设置 取消。',
   '',
-  '/群设置 恢复 123456789：恢复该群全部接话默认，白名单和旁听不变。',
+  '/群设置 恢复 123456789：恢复该群全部接话默认，响应模式、白名单和旁听不变。',
   '旁听只额外记录非白名单群的新文字，整理可能产生费用，不删旧记忆。',
   '指令总开关：面板 → 聊天 → 主人私聊：群设置指令。',
 ].join('\n')
-const FIELDS = { 主动: 'proactive', 窗口: 'engaged', 旁听: 'passive_memory', 白名单: 'whitelist' }
+const FIELDS = { 主动: 'proactive', 窗口: 'engaged', 旁听: 'passive_memory', 白名单: 'whitelist', 模式: 'mode' }
 const MAX_BATCH = 100, PAGE_SIZE = 10, TTL = 2 * 60_000
 // 每个宿主只保留一份待确认操作；没有定时器，不写会话历史或持久化任务。
 const sessions = new WeakMap()
@@ -50,9 +52,15 @@ export function parseGroupSettingsCommand(arg) {
   const changes = {}
   for (let i = 0; i < rest.length; i += 2) {
     const key = Object.hasOwn(FIELDS, rest[i]) ? FIELDS[rest[i]] : null
-    if (!key || Object.hasOwn(changes, key) || !['开', '关'].includes(rest[i + 1])) return { error: '仅支持 主动、窗口、旁听、白名单，每项只写一次，后面填 开 或 关。未修改。' }
+    if (key === 'mode' && !Object.hasOwn(changes, key)) {
+      const modes = { 不响应群消息: 'off', 仅模块: 'modules', 允许AI聊天: 'chat' }
+      if (!Object.hasOwn(modes, rest[i + 1])) return { error: '模式请填 不响应群消息、仅模块 或 允许AI聊天。未修改。' }
+      changes.mode = modes[rest[i + 1]]; continue
+    }
+    if (!key || Object.hasOwn(changes, key) || !['开', '关'].includes(rest[i + 1])) return { error: '支持 模式（不响应群消息/仅模块/允许AI聊天）；主动、窗口、旁听、白名单，每项只写一次，后面填 开 或 关。未修改。' }
     changes[key] = rest[i + 1] === '开'
   }
+  if (Object.hasOwn(changes, 'mode') && Object.hasOwn(changes, 'whitelist')) return { error: '模式已包含白名单设置，请不要同时填写白名单。未修改。' }
   return { action: 'set', ids, target, changes }
 }
 
@@ -76,15 +84,15 @@ function plan(cfg, request, ids) {
 
 // 只关心会影响这批操作的设置；别的群或模型设置变化不造成冲突，也不会被覆盖。
 function baseline(cfg, ids) {
-  const { overrides, ...defaults } = cfg.group
+  const { overrides, moduleOnlyGroups, ...defaults } = cfg.group
   return structuredClone({ owner: cfg.ownerQQ, defaults, enabled: cfg.enabled, dryRun: cfg.dryRun, debug: cfg.debug,
     memoryEnabled: cfg.memory.enabled,
-    groups: ids.map(id => ({ id, override: overrides[id], allowed: cfg.allow.groups.includes(id), passive: cfg.memory.passiveGroups.includes(id) })) })
+    groups: ids.map(id => ({ id, moduleOnly: (moduleOnlyGroups || []).includes(id), override: overrides[id], allowed: cfg.allow.groups.includes(id), passive: cfg.memory.passiveGroups.includes(id) })) })
 }
 
 function changeText(request) {
   return request.action === 'reset' ? '恢复全部接话默认（包括概率和次数等单独设置），白名单和旁听不变'
-    : Object.entries(FIELDS).filter(([, key]) => Object.hasOwn(request.changes, key)).map(([label, key]) => `${label} ${request.changes[key] ? '开' : '关'}`).join('\n') + '\n其余设置不变。'
+    : Object.entries(FIELDS).filter(([, key]) => Object.hasOwn(request.changes, key)).map(([label, key]) => `${label} ${key === 'mode' ? GROUP_RESPONSE_LABELS[request.changes[key]] : request.changes[key] ? '开' : '关'}`).join('\n') + '\n其余设置不变。'
 }
 function consequences(request, cfg, ids) {
   const lines = []
@@ -92,8 +100,9 @@ function consequences(request, cfg, ids) {
     const count = ids.filter(id => readSettings(cfg, id).state.interject_chance === 0).length
     if (count) lines.push(`${count} 个群的主动概率为 0，将恢复为 ${Math.round((cfg.group.interjectChance || DEFAULT_GROUP_POLICY.interjectChance) * 100)}%；未指定的窗口开关保持原样。`)
   }
+  if (request.changes?.mode) lines.push(request.changes.mode === 'off' ? '将移出白名单；若在旁听名单中，仍可记录新文字。' : '将加入白名单，记忆按白名单群规则；模块仍受自身开关和权限限制。')
   if (Object.hasOwn(request.changes || {}, 'passive_memory') || Object.hasOwn(request.changes || {}, 'whitelist')) lines.push('白名单群不受旁听名单控制；旁听只记录非白名单群新文字，记忆整理可能产生费用，不删除旧记忆。')
-  lines.push('接话只对白名单群生效；总开关、暂停、静默和次数限制仍有效。')
+  lines.push('接话只在「允许 AI 聊天」时生效；总开关、暂停、静默和次数限制仍有效。')
   return lines.join('\n')
 }
 const on = value => value ? '开' : '关'
@@ -104,6 +113,7 @@ function memorySummary(s) {
 function chatSummary(cfg, s) {
   const reasons = []
   if (!s.chat_whitelisted) reasons.push('不在白名单')
+  else if (s.response_mode === 'modules') reasons.push('仅模块，AI 不接话')
   if (!cfg.enabled) reasons.push('总开关关闭')
   else if (cfg.debug) reasons.push('调试模式')
   else if (cfg.dryRun) reasons.push('试运行')
@@ -119,6 +129,7 @@ function groupReport(cfg, report, { name = '', brief = false } = {}) {
   const passive = s.passive_memory ? '已加入' : '未加入'
   if (brief) return [
     title,
+    `模式：${GROUP_RESPONSE_LABELS[s.response_mode]}`,
     `白名单：${s.chat_whitelisted ? '在' : '不在'}；被叫到：${chatSummary(cfg, s)}`,
     `主动：${active}；窗口：${window}`,
     `记忆：${memorySummary(s)}；旁听名单：${passive}`,
@@ -128,6 +139,7 @@ function groupReport(cfg, report, { name = '', brief = false } = {}) {
   // 只去掉已在白名单/记录范围中说明的重复文字；实际限制和恢复方式保留。
   const notices = s.notices.filter(n => !n.startsWith('不在聊天白名单') && !n.startsWith('白名单群的记忆') && !n.startsWith('没有额外旁听'))
   return [title, '',
+    `群响应模式：${GROUP_RESPONSE_LABELS[s.response_mode]}`,
     `聊天白名单：${s.chat_whitelisted ? '在' : '不在'}`,
     `被叫到：${chatSummary(cfg, s)}`,
     `主动插话：${active}`,
