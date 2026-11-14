@@ -1326,7 +1326,10 @@ test('#58 在 DSH 会话窗口里直接打字：这一轮按主人说的算（�
   // 从 QQ 发一条消息，建立新的 QQ 会话
   const n = fake.turns.length
   mock.push(priv(OWNER, text('在吗')))
-  await until(() => fake.turns.length > n)
+  await until(() => {
+    const id = api.hub.sessions()['private:' + OWNER]?.sessionId
+    return id && fake.turns.slice(n).some(turn => turn.sessionId === id)
+  })
   // 后台任务也会创建会话；用 QQ 映射定位，不能假定最后一个会话就是主人私聊。
   const sid = api.hub.sessions()['private:' + OWNER]?.sessionId
   assert.ok(sid, '新会话建出来了')
